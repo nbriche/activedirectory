@@ -3,21 +3,14 @@
 from __future__ import unicode_literals
 from __future__ import print_function
 import logging
-import os
-import traceback
 import types
 import unittest
 import socket
-import sys
 from collections import defaultdict
 from collections import OrderedDict
 import ldap3
 from ldap3.utils.conv import escape_bytes
-from ldap3.protocol.rfc4511 import SearchRequest, ValsAtLeast1, Scope, Integer0ToMax, TypesOnly, Filter, AttributeSelection, Selector, EqualityMatch
-try:
-    import configparser
-except:
-    from six.moves import configparser
+from ldap3.protocol.rfc4511 import Integer0ToMax
 try:
     from urlparse import urlparse
 except:
@@ -30,7 +23,8 @@ class ActiveDirectory(object):
         self.__init__(self.url, self.dn, self.secret, base=self.base)
 
     def __init__(self, url, dn=None, secret=None, base="", debug=False, paged_size=1000, size_limit=None, time_limit=None):
-        """If you do not specify credentials (dn and secret) it will try to load them from ~/.netrc file.
+        """
+        If you do not specify credentials (dn and secret) it will try to load them from ~/.netrc file.
 
         @param server: url of LDAP Server
         @param dn: username of the service account
@@ -81,10 +75,10 @@ class ActiveDirectory(object):
                 netrc_config = netrc.netrc()
                 for h in netrc_config.hosts:
                     if h.lower() == u.hostname.lower():
-                        dn, account, secret = netrc_config.authenticators(h)
+                        dn, dummy_account, secret = netrc_config.authenticators(h)
                         break
             except Exception as e:
-                logging.warning("~/.netrc ignored due to: %s" % e)
+                logging.warning("~/.netrc ignored due to: %s", e)
 
         self.server = ldap3.Server(host=u.hostname, port=u.port, use_ssl=use_ssl)
         self.conn = ldap3.Connection(self.server,
@@ -95,7 +89,7 @@ class ActiveDirectory(object):
                                      password=secret,
                                      authentication=ldap3.AUTH_SIMPLE)
         try:
-            ret = self.conn.bind()
+            self.conn.bind()
         except Exception as e:
             self.logger.error(e)
         else:
@@ -121,7 +115,6 @@ class ActiveDirectory(object):
         :rtype : object
         """
         ret = []
-        total_entries = 0
         if base is None:
             base = self.base
         if scope is None:
@@ -143,7 +136,6 @@ class ActiveDirectory(object):
             cookie = self.conn.result['controls']['1.2.840.113556.1.4.319']['value']['cookie']
         ret.extend(self.conn.response)
 
-        total_entries += len(self.conn.response)
         while cookie:
             self.conn.search(
                 search_base=base,
@@ -160,7 +152,6 @@ class ActiveDirectory(object):
                 cookie = None
             else:
                 cookie = self.conn.result['controls']['1.2.840.113556.1.4.319']['value']['cookie']
-            total_entries += len(self.conn.response)
             ret.extend(self.conn.response)
             if self.size_limit and len(ret) >= self.size_limit:
                 return ret[:self.size_limit]
@@ -186,17 +177,17 @@ class ActiveDirectory(object):
         :param user: sAMAccountName of the user
         :return: sAMAccountName of the manager or None
         """
-        filter = "(&%s(sAMAccountName=%s))" % (self.filter, user)
-        ret = self.search_ext_s(filter, ["manager"])
+        filterstr = "(&%s(sAMAccountName=%s))" % (self.filter, user)
+        ret = self.search_ext_s(filterstr=filterstr, attrlist=["manager"])
         if ret and ret[0] and 'manager' in ret[0]['attributes'] and ret[0]['attributes']['manager']:
             ret = ret[0]['attributes']['manager'][0]
             if ret:
                 return self.get_username(dn=ret)
 
     def get_managers(self):
-        filter = "(&%s(sAMAccountName=*)(manager=*))" % self.filter
+        filterstr = "(&%s(sAMAccountName=*)(manager=*))" % self.filter
         result = {}
-        for r in self.search_ext_s(filterstr=filter, attrlist=['sAMAccountName', "manager"]):
+        for r in self.search_ext_s(filterstr=filterstr, attrlist=['sAMAccountName', "manager"]):
             user = self.get_username(dn=r['dn'])
             manager = self.get_username(dn=r['attributes']['manager'][0])
             if user is None or manager is None:
@@ -209,9 +200,9 @@ class ActiveDirectory(object):
         # attrlist default used to be ["sAMAccountName"] instead of all.
         if not new_filter:
             new_filter = ""
-        filter = "(&%s(sAMAccountName=*)(samAccountType=805306368)%s)" % (self.filter, new_filter)
+        filterstr = "(&%s(sAMAccountName=*)(samAccountType=805306368)%s)" % (self.filter, new_filter)
         rets = OrderedDict()
-        for x in self.search_ext_s(filterstr=filter, attrlist=attrlist):
+        for x in self.search_ext_s(filterstr=filterstr, attrlist=attrlist):
             # if ret and ret[0] and isinstance(ret[0][1], dict):
             username = x['attributes']["sAMAccountName"][0]
             rets[username] = self.__compress_attributes(x['attributes'])
@@ -222,15 +213,15 @@ class ActiveDirectory(object):
 
         :type self: object
         """
-        filter = "(&(objectCategory=group)(mail=*))"
+        filterstr = "(&(objectCategory=group)(mail=*))"
         rets = []
-        for x in self.search_ext_s(filterstr=filter, attrlist=["sAMAccountName"]):
+        for x in self.search_ext_s(filterstr=filterstr, attrlist=["sAMAccountName"]):
             # if ret and ret[0] and isinstance(ret[0][1], dict):
             # print(x)
             try:
                 rets.append(x['attributes']["sAMAccountName"][0])
             except Exception as e:
-                logging.error("%s: %s" % (e, x))
+                logging.error("%s: %s", e, x)
         return sorted(rets)
 
     def get_manager_attributes(self, user):
@@ -244,13 +235,15 @@ class ActiveDirectory(object):
     def escaped(query):
         return escape_bytes(query)
 
-    def __as_unicode(self, s):
+    @staticmethod
+    def __as_unicode(s):
         if s:
             return s.decode('utf-8')
         else:
             return s
 
-    def __compress_attributes(self, dic):
+    @staticmethod
+    def __compress_attributes(dic):
         """
         This will convert all attributes that are list with only one item string into simple string. It seems that LDAP always return lists, even when it doesn
         t make sense.
@@ -271,7 +264,7 @@ class ActiveDirectory(object):
                     try:
                         result[k] = v[0].decode('utf-8')
                     except Exception as e:
-                        logging. error("Failed to decode attribute: %s -- %s" % (k, e))
+                        logging. error("Failed to decode attribute: %s -- %s", k, e)
                         result[k] = v[0]
         return result
 
@@ -281,19 +274,18 @@ class ActiveDirectory(object):
         if attributes is None:
             attributes = self.attrs
         if user:
-            filter = "(&%s(sAMAccountName=%s))" % (
+            filterstr = "(&%s(sAMAccountName=%s))" % (
                 self.filter, self.escaped(user))
         elif name:
-            filter = "(&%s(displayName=%s))" % (
+            filterstr = "(&%s(displayName=%s))" % (
                 self.filter, self.escaped(name))
         elif email:
-            filter = "(&%s(|(mail=%s)(proxyAddresses=smtp:%s)))" % (self.filter, self.escaped(email), self.escaped(email))
+            filterstr = "(&%s(|(mail=%s)(proxyAddresses=smtp:%s)))" % (self.filter, self.escaped(email), self.escaped(email))
         else:
-            filter = None
+            filterstr = None
 
-        res = {}
-        self.logger.debug("%s : %s" % (filter, attributes))
-        r = self.search_ext_s(filterstr=filter, attrlist=attributes)
+        self.logger.debug("%s : %s", filterstr, attributes)
+        r = self.search_ext_s(filterstr=filterstr, attrlist=attributes)
         if not r:
             return {}
 
@@ -313,17 +305,17 @@ class ActiveDirectory(object):
         :param dn:
         :return: str
         """
-        filter = "(objectclass=*)"
+        filterstr = "(objectclass=*)"
         if user is None and email is None and name is None and dn is None:
             raise Exception("How do you expect to get an attribute when you specify no even one of user/email/name?")
         if user:
-            filter = "(&%s(sAMAccountName=%s))" % (
+            filterstr = "(&%s(sAMAccountName=%s))" % (
                 self.filter, self.escaped(user))
         elif name:
-            filter = "(&%s(displayName=*%s*))" % (
+            filterstr = "(&%s(displayName=*%s*))" % (
                 self.filter, self.escaped(name))
         elif email:
-            filter = "(&%s(|(mail=%s)(proxyAddresses=smtp:%s)))" % (self.filter, self.escaped(email), self.escaped(email))
+            filterstr = "(&%s(|(mail=%s)(proxyAddresses=smtp:%s)))" % (self.filter, self.escaped(email), self.escaped(email))
 
         if dn:
             try:
@@ -337,7 +329,7 @@ class ActiveDirectory(object):
             except Exception as e:
                 raise e
         else:
-            r = self.search_ext_s(filterstr=filter, attrlist=[attribute])
+            r = self.search_ext_s(filterstr=filterstr, attrlist=[attribute])
 
         if not r:
             return None
@@ -360,8 +352,8 @@ class ActiveDirectory(object):
             NotImplementedError()
 
     def get_dn(self, user):
-        filter = "(&%s(sAMAccountName=%s))" % (self.filter, user)
-        r = self.search_ext_s(filterstr=filter, scope=self.scope)
+        filterstr = "(&%s(sAMAccountName=%s))" % (self.filter, user)
+        r = self.search_ext_s(filterstr=filterstr, scope=self.scope)
         if not user or not r or len(r) != 1:
             return None
         return r[0]['dn']
@@ -370,8 +362,6 @@ class ActiveDirectory(object):
         return self.__as_unicode(self.get_attribute(attribute='mail', user=user))
 
     def is_user_enabled(self, user):
-        ret = None
-        dn = self.get_dn(user)
         if user is None:
             return None
         attr = self.get_attribute(attribute="userAccountControl", user=user)
@@ -420,8 +410,7 @@ class ActiveDirectoryTestCase(unittest.TestCase):
                                   secret='a3sv42vAS2vl',
                                   size_limit=self.size_limit,
                                   paged_size=self.paged_size,
-                                  time_limit=self.time_limit
-                                  )
+                                  time_limit=self.time_limit)
 
     def test_get_name(self):
         name = self.ad.get_name('john.doe')
@@ -429,7 +418,7 @@ class ActiveDirectoryTestCase(unittest.TestCase):
 
     def test_get_name2(self):
         # this one tests special characters that do need to be properly escaped
-        self.assertEqual(self.ad.get_name('tester'), 'Eşcâpe Tester (./\@$#)')
+        self.assertEqual(self.ad.get_name('tester'), r'Eşcâpe Tester (./\@$#)')
 
     def test_get_email_invalid(self):
         # getting email of non existing account should return none
@@ -471,8 +460,5 @@ class ActiveDirectoryTestCase(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    import sys
-
     logging.basicConfig(format='%(levelname)s %(message)s', level=logging.DEBUG)
-
     unittest.main()
